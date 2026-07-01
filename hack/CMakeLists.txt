@@ -4,8 +4,6 @@ blt_add_executable(
   INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}
   SOURCES
      femheart.cpp
-     pod_coarse_space.cpp
-     two_level_asm.cpp
      MatrixElementPiecewiseCoefficient.cpp
      util.cpp
      cardiac_coefficients.cpp

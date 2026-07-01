@@ -20,8 +20,6 @@
 #include "MatrixElementPiecewiseCoefficient.hpp"
 #include "cardiac_coefficients.hpp"
 #include "torsoSolver.hpp"
-#include "pod_coarse_space.hpp"
-#include "two_level_asm.hpp"
 
 #include <map>
 #include <unordered_set>
@@ -931,6 +929,30 @@ void recursive_mkdir(const std::string dirname, mode_t mode=S_IRWXU|S_IRWXG)
 
 
 
+// Configure a PETSc CG + single-level Additive Schwarz (ASM) preconditioner for
+// the KSP identified by the given options prefix. The settings go into the PETSc
+// options database, so MFEM's Customize()/KSPSetFromOptions applies them on the
+// first solve. Sub-domain blocks are solved with preonly + ICC(icc_levels).
+// This is the single-level ASM baseline for the strong-scaling study (the POD
+// coarse space has been removed).
+static void ConfigureAsmCgOptions(const std::string &prefix,
+                                  int asm_overlap,
+                                  int icc_levels)
+{
+   auto set_opt = [&](const std::string &key, const std::string &value)
+   {
+      const std::string full_key = "-" + prefix + key;
+      PetscOptionsSetValue(NULL, full_key.c_str(), value.c_str());
+   };
+   set_opt("ksp_type", "cg");
+   set_opt("pc_type", "asm");
+   set_opt("pc_asm_type", "basic");
+   set_opt("pc_asm_overlap", std::to_string(asm_overlap));
+   set_opt("sub_ksp_type", "preonly");
+   set_opt("sub_pc_type", "icc");
+   set_opt("sub_pc_factor_levels", std::to_string(icc_levels));
+}
+
 int main(int argc, char *argv[])
 {
    MPI_Init(NULL,NULL);
@@ -1244,69 +1266,35 @@ if (my_rank == 0) {
                 << std::endl;
    }
 
-   PetscBool pod_enable_opt = PETSC_FALSE;
-   PetscBool pod_opt_set = PETSC_FALSE;
-   PetscOptionsGetBool(NULL, NULL, "-recoverue_pod_enable",
-                       &pod_enable_opt, &pod_opt_set);
-   bool recoverue_pod_enable = (pod_enable_opt == PETSC_TRUE);
-   if (!use_petsc || !solveForUe)
+   // Single-level ASM + CG configuration for the strong-scaling study. All three
+   // linear systems (monodomain, u_e recovery, torso) are solved with CG using a
+   // single-level Additive Schwarz preconditioner and ICC sub-domain solves.
+   // Overlap and ICC fill levels are shared, runtime-tunable knobs:
+   //   -asm_overlap <N>     (default 1)
+   //   -asm_icc_levels <L>  (default 0)
+   PetscInt asm_overlap = 1;
+   PetscOptionsGetInt(NULL, NULL, "-asm_overlap", &asm_overlap, NULL);
+   asm_overlap = std::max<PetscInt>(0, asm_overlap);
+
+   PetscInt asm_icc_levels = 0;
+   PetscOptionsGetInt(NULL, NULL, "-asm_icc_levels", &asm_icc_levels, NULL);
+   asm_icc_levels = std::max<PetscInt>(0, asm_icc_levels);
+
+   if (use_petsc)
    {
-      recoverue_pod_enable = false;
+      ConfigureAsmCgOptions("monodomain_", static_cast<int>(asm_overlap),
+                            static_cast<int>(asm_icc_levels));
+      ConfigureAsmCgOptions("recoverue_", static_cast<int>(asm_overlap),
+                            static_cast<int>(asm_icc_levels));
+      ConfigureAsmCgOptions("torso_", static_cast<int>(asm_overlap),
+                            static_cast<int>(asm_icc_levels));
    }
 
-   PetscInt pod_warmup_steps = std::max(0, static_cast<int>(10.0 / dt));
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_warmup_steps",
-                      &pod_warmup_steps, NULL);
-   pod_warmup_steps = std::max<PetscInt>(0, pod_warmup_steps);
-
-   const int default_snapshots =
-      std::max(2, std::min(100, max_time_steps - static_cast<int>(pod_warmup_steps) - 1));
-   PetscInt pod_snapshot_count = default_snapshots;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_snapshot_count",
-                      &pod_snapshot_count, NULL);
-   pod_snapshot_count = std::max<PetscInt>(2, pod_snapshot_count);
-
-   PetscInt pod_max_basis = 30;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_max_basis",
-                      &pod_max_basis, NULL);
-   pod_max_basis = std::max<PetscInt>(1, pod_max_basis);
-
-   PetscInt pod_min_basis = 1;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_min_basis",
-                      &pod_min_basis, NULL);
-   pod_min_basis = std::max<PetscInt>(1, std::min(pod_min_basis, pod_max_basis));
-
-   PetscInt pod_snapshot_stride = 1;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_snapshot_stride",
-                      &pod_snapshot_stride, NULL);
-   pod_snapshot_stride = std::max<PetscInt>(1, pod_snapshot_stride);
-
-   PetscReal pod_energy_tol = 1.0 - 1e-6;
-   PetscOptionsGetReal(NULL, NULL, "-recoverue_pod_energy_tol",
-                       &pod_energy_tol, NULL);
-   pod_energy_tol = std::min<PetscReal>(1.0, std::max<PetscReal>(0.0, pod_energy_tol));
-
-   PetscReal pod_orth_tol = 1e-8;
-   PetscOptionsGetReal(NULL, NULL, "-recoverue_pod_orth_tol",
-                       &pod_orth_tol, NULL);
-
-   PetscInt pod_asm_overlap = 2;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_asm_overlap",
-                      &pod_asm_overlap, NULL);
-   pod_asm_overlap = std::max<PetscInt>(0, pod_asm_overlap);
-
-   PetscInt pod_icc_levels = 2;
-   PetscOptionsGetInt(NULL, NULL, "-recoverue_pod_sub_pc_factor_levels",
-                      &pod_icc_levels, NULL);
-   pod_icc_levels = std::max<PetscInt>(0, pod_icc_levels);
-
-   if (my_rank == 0 && recoverue_pod_enable)
+   if (my_rank == 0)
    {
-      std::cout << "[POD] recoverue two-level ASM enabled: snapshots = "
-                << pod_snapshot_count << ", stride = " << pod_snapshot_stride
-                << ", warmup steps = " << pod_warmup_steps
-                << ", k in [" << pod_min_basis << ", " << pod_max_basis << "]"
-                << ", energy tol = " << pod_energy_tol << std::endl;
+      std::cout << "[ASM] single-level ASM+CG for all systems: overlap = "
+                << asm_overlap << ", ICC levels = " << asm_icc_levels
+                << std::endl;
    }
 
    StartTimer("Setting Attributes");
@@ -1574,7 +1562,7 @@ else
     ConvertHypreToPetscAIJSafe(LHS_mat, *LHS_monodomain_petsc,
                                "monodomain_LHS", my_rank);
     DebugMatrixStage("monodomain safe PETSc conversion done");
-    pcg_monodomain_petsc = new PetscPCGSolver(MPI_COMM_WORLD);
+    pcg_monodomain_petsc = new PetscPCGSolver(MPI_COMM_WORLD, "monodomain_", true);
    DebugMatrixStage("monodomain PETSc SetOperator begin");
    pcg_monodomain_petsc->SetOperator(*LHS_monodomain_petsc);
    DebugMatrixStage("monodomain PETSc SetOperator done");
@@ -1772,7 +1760,7 @@ else
         MFEM_VERIFY(ierr == 0, "MatNullSpaceDestroy failed for recoverue A2.");
         if (my_rank == 0)
         {
-            std::cout << "[POD] MatSetNullSpace(span{1}) attached to A2."
+            std::cout << "[recoverue] MatSetNullSpace(span{1}) attached to A2."
                       << std::endl;
         }
         DebugMatrixStage("recoverue MatNullSpace attach done");
@@ -1806,29 +1794,11 @@ double M_total_recoverue =
     InnerProduct(MPI_COMM_WORLD, ones_true_recoverue, M_ones_recoverue);
 MFEM_VERIFY(M_total_recoverue > 0.0, "Recoverue mass matrix has zero total mass.");
 
-std::vector<Vector> U_recoverue_snapshots;
-if (recoverue_pod_enable)
-{
-    U_recoverue_snapshots.reserve(static_cast<size_t>(pod_snapshot_count));
-}
-bool recoverue_pod_ready = false;
-PODCoarseSpace* recoverue_pod = nullptr;
-int total_iterations_recoverue_pre_pod = 0;
-int solve_count_recoverue_pre_pod = 0;
-int total_iterations_recoverue_pod_online = 0;
-int solve_count_recoverue_pod_online = 0;
-
 if (my_rank == 0)
 {
-    std::cout << "[POD] recoverue mass gauge ready, 1^T M 1 = "
+    std::cout << "[recoverue] mass gauge ready, 1^T M 1 = "
               << std::scientific << M_total_recoverue << std::defaultfloat
               << std::endl;
-    if (recoverue_pod_enable &&
-        static_cast<int>(pod_warmup_steps + pod_snapshot_stride * (pod_snapshot_count - 1)) >= max_time_steps - 1)
-    {
-        std::cout << "[POD] warning: current snapshot schedule may leave few or no "
-                  << "online steps before max_time_steps." << std::endl;
-    }
 }
 
 
@@ -2024,8 +1994,7 @@ t_ionic_start = MPI_Wtime();
     
     // 记录求解时间
     t_ksp2_start = MPI_Wtime();
-    const bool recoverue_solve_used_pod = recoverue_pod_ready;
-    
+
     // 求解线性系统
     if (!use_petsc) {
         pcg_recoverue_hypre->Mult(rhs_recoverue, X_recoverue);
@@ -2034,24 +2003,6 @@ t_ionic_start = MPI_Wtime();
         int current_iterations = pcg_recoverue_petsc->GetNumIterations();
         total_iterations_recoverue += current_iterations;
         solve_count_recoverue++;
-        if (recoverue_solve_used_pod)
-        {
-            total_iterations_recoverue_pod_online += current_iterations;
-            solve_count_recoverue_pod_online++;
-        }
-        else
-        {
-            total_iterations_recoverue_pre_pod += current_iterations;
-            solve_count_recoverue_pre_pod++;
-        }
-        if (my_rank == 0 && recoverue_pod_enable)
-        {
-            std::cout << "[POD] recoverue step " << itime
-                      << " iterations = " << current_iterations
-                      << (recoverue_solve_used_pod ? " (two-level)" : " (ASM)")
-                      << std::endl;
-        }
-    
     }
     
     t_ksp2_end = MPI_Wtime();
@@ -2064,69 +2015,8 @@ t_ionic_start = MPI_Wtime();
         const double gauge_before =
             InnerProduct(MPI_COMM_WORLD, ones_true_recoverue, Mu);
         X_recoverue.Add(-gauge_before / M_total_recoverue, ones_true_recoverue);
-
-        if (recoverue_pod_enable)
-        {
-            M_recoverue.Mult(X_recoverue, Mu);
-            const double gauge_after =
-                InnerProduct(MPI_COMM_WORLD, ones_true_recoverue, Mu);
-            if (my_rank == 0)
-            {
-                std::cout << "[POD] recoverue mass gauge step " << itime
-                          << ": before = " << std::scientific << gauge_before
-                          << ", after = " << gauge_after << std::defaultfloat
-                          << std::endl;
-            }
-        }
     }
     gf_ue.SetFromTrueDofs(X_recoverue);
-
-    if (recoverue_pod_enable &&
-        !recoverue_pod_ready &&
-        use_petsc &&
-        itime >= pod_warmup_steps &&
-        ((itime - static_cast<int>(pod_warmup_steps)) %
-         static_cast<int>(pod_snapshot_stride) == 0) &&
-        static_cast<int>(U_recoverue_snapshots.size()) < pod_snapshot_count)
-    {
-        Vector snap(X_recoverue.Size());
-        snap = X_recoverue;
-        U_recoverue_snapshots.push_back(std::move(snap));
-
-        if (my_rank == 0)
-        {
-            std::cout << "[POD] collected " << U_recoverue_snapshots.size()
-                      << " / " << pod_snapshot_count
-                      << " recoverue snapshots." << std::endl;
-        }
-
-        if (static_cast<int>(U_recoverue_snapshots.size()) == pod_snapshot_count)
-        {
-            recoverue_pod = new PODCoarseSpace(pfespace, A_recoverue_petsc,
-                                               M_recoverue, ones_true_recoverue,
-                                               M_total_recoverue, MPI_COMM_WORLD);
-            recoverue_pod->BuildBasis(U_recoverue_snapshots,
-                                      static_cast<int>(pod_max_basis),
-                                      static_cast<double>(pod_energy_tol),
-                                      static_cast<int>(pod_min_basis));
-
-            AttachTwoLevelASM(pcg_recoverue_petsc, recoverue_pod, pfespace,
-                              MPI_COMM_WORLD,
-                              static_cast<int>(pod_asm_overlap),
-                              static_cast<int>(pod_icc_levels));
-
-            recoverue_pod_ready = true;
-            U_recoverue_snapshots.clear();
-            U_recoverue_snapshots.shrink_to_fit();
-
-            if (my_rank == 0)
-            {
-                std::cout << "[POD] basis ready, k = " << recoverue_pod->Rank()
-                          << ", switched recoverue to two-level ASM."
-                          << std::endl;
-            }
-        }
-    }
 
 
       }
@@ -2217,34 +2107,6 @@ t_boundary_duration_2 = t_boundary_end_2 - t_boundary_start_2;
         std::cout << "monodomain 平均迭代次数: " << (double)total_iterations_monodomain / solve_count_monodomain << std::endl;
         std::cout << "re ue 平均迭代次数: " << (double)total_iterations_recoverue / solve_count_recoverue << std::endl;
         std::cout << "torso 平均迭代次数: " << (double)total_iterations_torso / solve_count_torso << std::endl;
-        if (recoverue_pod_enable)
-        {
-            std::cout << "\n--- POD Two-Level ASM Statistics ---" << std::endl;
-            std::cout << "Snapshots requested: " << pod_snapshot_count << std::endl;
-            std::cout << "Snapshots remaining in memory: "
-                      << U_recoverue_snapshots.size() << std::endl;
-            std::cout << "POD ready: " << (recoverue_pod_ready ? "yes" : "no")
-                      << std::endl;
-            if (recoverue_pod_ready && recoverue_pod)
-            {
-                std::cout << "Coarse-space rank k: "
-                          << recoverue_pod->Rank() << std::endl;
-            }
-            if (solve_count_recoverue_pre_pod > 0)
-            {
-                std::cout << "Sys2 avg iterations before POD: "
-                          << (double)total_iterations_recoverue_pre_pod /
-                                solve_count_recoverue_pre_pod
-                          << std::endl;
-            }
-            if (solve_count_recoverue_pod_online > 0)
-            {
-                std::cout << "Sys2 avg iterations with POD two-level ASM: "
-                          << (double)total_iterations_recoverue_pod_online /
-                                solve_count_recoverue_pod_online
-                          << std::endl;
-            }
-        }
     }
 
 
@@ -2300,7 +2162,6 @@ delete pcg_petsc;
 pcg_petsc = nullptr;
    if (pcg_recoverue_hypre) { delete pcg_recoverue_hypre; pcg_recoverue_hypre = nullptr; }
    if (precond_recoverue_hypre) { delete precond_recoverue_hypre; precond_recoverue_hypre = nullptr; }
-   if (recoverue_pod) { delete recoverue_pod; recoverue_pod = nullptr; }
 delete LHS_monodomain_petsc;
 LHS_monodomain_petsc = nullptr;
 delete A_recoverue_petsc;
