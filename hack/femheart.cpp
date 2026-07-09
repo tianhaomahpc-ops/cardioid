@@ -167,10 +167,21 @@ int main(int argc, char *argv[])
    assert(obj != NULL);
 
    StartTimer("Read the mesh");
-   // Read shared global mesh
-   mfem::Mesh *mesh = ecg_readMeshptr(obj, "mesh");
+   // Parallel mesh load: each rank reads ONLY its own partition from a
+   // pre-partitioned VisIt data collection produced offline by write_parmesh.
+   // No rank ever holds the full serial mesh (MFEM's serial->ParMesh path would
+   // require the whole mesh on every rank -- exactly what we eliminate here).
+   // Run write_parmesh once with the SAME rank count you will solve with.
+   std::ostringstream oss_coll_name;
+   oss_coll_name << "par-data-" << std::setfill('0') << std::setw(6) << num_ranks;
+   VisItDataCollection visit_dc(MPI_COMM_WORLD, oss_coll_name.str());
+   visit_dc.SetPrefixPath("parData/");
+   visit_dc.Load();
+   ParMesh *pmesh = dynamic_cast<ParMesh*>(visit_dc.GetMesh());
+   MFEM_VERIFY(pmesh != NULL,
+               "Failed to load ParMesh from parData/par-data-****** collection.");
    EndTimer();
-   int dim = mesh->Dimension();
+   int dim = pmesh->Dimension();
 
    //Fill in the MatrixElementPiecewiseCoefficients
    std::vector<int> heartRegions;
@@ -302,30 +313,20 @@ int main(int argc, char *argv[])
 
    
    StartTimer("Setting Attributes");
-   mesh->SetAttributes();
+   pmesh->SetAttributes();
    EndTimer();
 
-   StartTimer("Partition Mesh");
-   // If I read correctly, pmeshpart will now point to an integer array
-   //  containing a partition ID (rank!) for every element ID.
-   int *pmeshpart = mesh->GeneratePartitioning(num_ranks);
-   EndTimer();
-
-
-   // NOTE (MFEM-native rewrite): the manual, replicated global bookkeeping that
-   // used to live here -- pvertset / local_extents / globalvert_from_ranklookup /
-   // ghostlocalvert_from_ranklookup / material_from_ranklookup -- has been removed.
-   // Once the ParMesh / ParFiniteElementSpace exist, MFEM already provides
-   // everything we need, without any O(N_global)-per-rank arrays and without
-   // reverse-engineering MFEM's local vertex ordering:
+   // NOTE (MFEM-native rewrite): no serial-mesh replication, no
+   // GeneratePartitioning, and no ParMesh-from-serial construction -- pmesh was
+   // loaded per-rank above.  The old manual global bookkeeping (pvertset /
+   // local_extents / globalvert_from_ranklookup / ghostlocalvert_from_ranklookup
+   // / material_from_ranklookup) is gone too; MFEM's ParFiniteElementSpace
+   // provides every local<->global map we need:
    //   * per-rank contiguous true-dof partition  -> pfespace->GetTrueDofOffsets()
    //   * local-dof  -> global-true-dof number     -> pfespace->GetGlobalTDofNumber()
-   //   * uniquely-owned true dofs (the "flat" array the reaction engine wants)
+   //   * uniquely-owned true dofs (the "flat" reaction array)
    //                                              -> pfespace->GetLocalTDofNumber()
-   //   * element material/attribute after split   -> pmesh->GetAttribute(e)
-   // Cell types are built below directly in true-dof order; output uses
-   // ParaViewDataCollection (parallel, no gather-to-root).
-   ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh, pmeshpart);
+   //   * element attribute after partition        -> pmesh->GetAttribute(e)
    
    // Build a new FEC...
    FiniteElementCollection *fec;
@@ -333,7 +334,6 @@ int main(int argc, char *argv[])
    fec = new H1_FECollection(order, dim);
    // ...and corresponding FES
    ParFiniteElementSpace *pfespace = new ParFiniteElementSpace(pmesh, fec);
-   FiniteElementSpace *fespace = new FiniteElementSpace(mesh, fec);
    std::cout << "[" << my_rank << "] Number of finite element unknowns: "
 	     << pfespace->GetTrueVSize() << std::endl;
 
@@ -354,11 +354,13 @@ int main(int argc, char *argv[])
    gf_Vm = initVm;
    gf_b = 0.0;
 
-   // Load fiber quaternions from file
-   std::shared_ptr<GridFunction> flat_fiber_quat;
-   ecg_readGF(obj, "fibers", mesh, flat_fiber_quat);
-   std::shared_ptr<ParGridFunction> fiber_quat;
-   fiber_quat = std::make_shared<mfem::ParGridFunction>(pmesh, flat_fiber_quat.get(), pmeshpart);
+   // Fiber quaternions: loaded in parallel as a field of the same collection
+   // (written by write_parmesh).  The collection owns the ParGridFunction, so
+   // wrap it in a shared_ptr with a no-op deleter.
+   ParGridFunction *fiber_pgf = visit_dc.GetParField("fibers");
+   MFEM_VERIFY(fiber_pgf != NULL,
+               "Fiber field 'fibers' missing from parData collection.");
+   std::shared_ptr<ParGridFunction> fiber_quat(fiber_pgf, [](ParGridFunction*){});
 
    
    // Load conductivity data
@@ -577,7 +579,8 @@ int main(int argc, char *argv[])
    delete c;
    delete pfespace;
    if (order > 0) { delete fec; }
-   delete mesh, pmesh, pmeshpart;
-   
+   // pmesh and the fiber field are owned by visit_dc (freed when it goes out of
+   // scope at the end of main), so they are not deleted here.
+
    return 0;
 }
