@@ -312,93 +312,19 @@ int main(int argc, char *argv[])
    EndTimer();
 
 
-   //Go through all the elements and label the partitioning for the vertices
-   std::vector<set<int> > pvertset(mesh->GetNV());
-   for (int ielem=0; ielem<mesh->GetNE(); ielem++)
-   {
-      Array<int> verts;
-      mesh->GetElementVertices(ielem, verts);
-      for (int ivert=0; ivert<verts.Size(); ivert++)
-      {
-         pvertset[verts[ivert]].insert(pmeshpart[ielem]);
-      }
-   }
-
-   std::vector<int> local_extents(num_ranks+1);
-   {
-      std::vector<int> local_counts(num_ranks, 0);
-      for(int i=0; i<mesh->GetNV(); i++)
-      {
-         if ( ! pvertset[i].empty())
-         {
-            local_counts[*(pvertset[i].begin())]++;
-         }
-      }
-
-      local_extents[0] = 0;
-      for (int irank=0; irank<num_ranks; irank++)
-      {
-         local_extents[irank+1] = local_extents[irank]+local_counts[irank];
-      }
-   }
-
-   std::vector<int> globalvert_from_ranklookup(local_extents[num_ranks]);
-   std::vector<int> ghostlocalvert_from_ranklookup(local_extents[num_ranks]);
-   {
-      std::vector<int> cursor_ghostlocal_from_rank(num_ranks, 0);
-      std::vector<int> cursor_ranklookup_from_rank = local_extents;
-      for(int i=0; i<mesh->GetNV(); i++)
-      {
-         if ( ! pvertset[i].empty())
-         {
-            int irank = *(pvertset[i].begin());
-            int ranklookup = cursor_ranklookup_from_rank[irank]++;
-            int globalvert = i;
-            int ghostlocal = cursor_ghostlocal_from_rank[irank];
-            globalvert_from_ranklookup[ranklookup] = globalvert;
-            ghostlocalvert_from_ranklookup[ranklookup] = ghostlocal;
-            for (const int used_by_this_rank : pvertset[i])
-            {
-               cursor_ghostlocal_from_rank[used_by_this_rank]++;
-            }
-         }
-      }
-   }
-
-   //Get the element material types for each index.
-   std::vector<int> material_from_ranklookup(local_extents[num_ranks]);
-   {
-      std::vector<int> element_from_globalvert(mesh->GetNV(), mesh->GetNE());
-      for (int ielem=0; ielem<mesh->GetNE(); ielem++)
-      {
-         Array<int> verts;
-         mesh->GetElementVertices(ielem, verts);
-         for (int ivert=0; ivert<verts.Size(); ivert++)
-         {
-            element_from_globalvert[verts[ivert]] = std::min(element_from_globalvert[verts[ivert]], ielem);
-         }
-      }
-      std::vector<int> cursor_ranklookup_from_rank = local_extents;
-      for(int i=0; i<mesh->GetNV(); i++)
-      {
-         if ( ! pvertset[i].empty())
-         {
-            int irank = *(pvertset[i].begin());
-            int ranklookup = cursor_ranklookup_from_rank[irank]++;
-            int globalvert = i;
-
-            int ielem = element_from_globalvert[globalvert];
-            material_from_ranklookup[ranklookup] = mesh->GetElement(ielem)->GetAttribute();
-         }
-      }
-   }
-   
-   if (my_rank == 0)
-   {
-      for(int i=0; i<num_ranks; i++) {
-         std::cout << "Rank " << i << " has " << local_extents[i+1]-local_extents[i] << " nodes!" << std::endl;
-      }
-   }
+   // NOTE (MFEM-native rewrite): the manual, replicated global bookkeeping that
+   // used to live here -- pvertset / local_extents / globalvert_from_ranklookup /
+   // ghostlocalvert_from_ranklookup / material_from_ranklookup -- has been removed.
+   // Once the ParMesh / ParFiniteElementSpace exist, MFEM already provides
+   // everything we need, without any O(N_global)-per-rank arrays and without
+   // reverse-engineering MFEM's local vertex ordering:
+   //   * per-rank contiguous true-dof partition  -> pfespace->GetTrueDofOffsets()
+   //   * local-dof  -> global-true-dof number     -> pfespace->GetGlobalTDofNumber()
+   //   * uniquely-owned true dofs (the "flat" array the reaction engine wants)
+   //                                              -> pfespace->GetLocalTDofNumber()
+   //   * element material/attribute after split   -> pmesh->GetAttribute(e)
+   // Cell types are built below directly in true-dof order; output uses
+   // ParaViewDataCollection (parallel, no gather-to-root).
    ParMesh *pmesh = new ParMesh(MPI_COMM_WORLD, *mesh, pmeshpart);
    
    // Build a new FEC...
@@ -511,9 +437,28 @@ int main(int argc, char *argv[])
    QuadratureSpace quadSpace(pmesh, Iion_order);
    if (useNodalIion)
    {
-      for (int ranklookup=local_extents[my_rank]; ranklookup<local_extents[my_rank+1]; ranklookup++)
+      // One cell type per LOCAL TRUE DOF, in true-dof order -- the exact order
+      // the reaction models see Vm (actual_Vm has size GetTrueVSize()).  Take
+      // the attribute of an incident local element; MFEM preserves element
+      // attributes through the partition, so no serial-mesh lookup is needed.
+      cellTypes.assign(pfespace->GetTrueVSize(), -1);
+      Array<int> eldofs;
+      for (int e = 0; e < pmesh->GetNE(); e++)
       {
-         cellTypes.push_back(material_from_ranklookup[ranklookup]);
+         int attr = pmesh->GetAttribute(e);
+         pfespace->GetElementDofs(e, eldofs);
+         for (int j = 0; j < eldofs.Size(); j++)
+         {
+            int tdof = pfespace->GetLocalTDofNumber(eldofs[j]);
+            if (tdof >= 0 && cellTypes[tdof] < 0) { cellTypes[tdof] = attr; }
+         }
+      }
+      // Every owned true dof is incident to >=1 local element, but guard so the
+      // reaction never receives a sentinel value.
+      int fallback_attr = (pmesh->GetNE() > 0) ? pmesh->GetAttribute(0) : 0;
+      for (int t = 0; t < (int)cellTypes.size(); t++)
+      {
+         if (cellTypes[t] < 0) { cellTypes[t] = fallback_attr; }
       }
    }
    else
@@ -564,6 +509,16 @@ int main(int argc, char *argv[])
       actual_Vm = reactionWrapper.getVmReadonly();
    }
    
+   // MFEM-native parallel output: each rank writes its own piece of the field
+   // straight from the distributed ParGridFunction -- no gather-to-root, no
+   // hand-rolled global vertex reordering.  (Format changes from the old
+   // per-timestep Vm.npy to a ParaView .pvd collection.)
+   ParaViewDataCollection paraview_dc("femheart", pmesh);
+   paraview_dc.SetPrefixPath(outputDir);
+   paraview_dc.RegisterField("Vm", &gf_Vm);
+   paraview_dc.SetLevelsOfDetail(order);
+   paraview_dc.SetDataFormat(VTKFormat::BINARY);
+
    int itime=0;
    while (1)
    {
@@ -574,52 +529,10 @@ int main(int argc, char *argv[])
       //output if appropriate
       if ((itime % timeline.timestepFromRealTime(outputRate)) == 0)
       {
-         if (my_rank ==0)
-         {
-            std::string timedir = outputDir + "/tm" + timeline.outputIdFromTimestep(itime);
-            recursive_mkdir(timedir); 
-
-            std::vector<double> dataBuffer(local_extents[num_ranks]);
-            for (int irank=0; irank<num_ranks; irank++)
-            {
-               int local_size = local_extents[irank+1] - local_extents[irank];
-               std::vector<double> rankBuffer(local_size);
-               if (irank==0)
-               {
-                  if (local_extents[irank+1] > 0)
-                  {
-                     //Since rank 0 is always the least, ranklookup == localvert
-                     //the following assertion makes sure this is always true.
-                     assert(ghostlocalvert_from_ranklookup[local_extents[irank+1]-1] == local_extents[irank+1]-1);
-                     memcpy(&rankBuffer[0], &gf_Vm[0], sizeof(double)*local_size);
-                  }
-               }
-               else
-               {
-                  MPI_Status dontcare;
-                  MPI_Recv(&rankBuffer[0], local_size,
-                           MPI_DOUBLE, irank, 455, MPI_COMM_WORLD, &dontcare);
-               }
-               for (int ii=0; ii<local_size; ii++)
-               {
-                  dataBuffer[globalvert_from_ranklookup[ii+local_extents[irank]]] = rankBuffer[ii];
-               }
-            }
-            std::string VmFilename = timedir + "/Vm.npy";
-            save1dNumpyArray(timedir + "/Vm.npy", dataBuffer);
-         }
-         else
-         {
-            int local_size = local_extents[my_rank+1]-local_extents[my_rank];
-            std::vector<double> dataFromLocalRanklookup(local_size);
-            for (int ii=0; ii<local_size; ii++)
-            {
-               int ranklookup = local_extents[my_rank] + ii;
-               dataFromLocalRanklookup[ii] = gf_Vm[ghostlocalvert_from_ranklookup[ranklookup]];
-            }
-            MPI_Send(&dataFromLocalRanklookup[0], local_size,
-                     MPI_DOUBLE, 0, 455, MPI_COMM_WORLD);
-         }
+         // Parallel write; MFEM handles the distributed layout and directories.
+         paraview_dc.SetCycle(itime);
+         paraview_dc.SetTime(timeline.realTimeFromTimestep(itime));
+         paraview_dc.Save();
       }
       //if end time, then exit
       if (itime == timeline.maxTimesteps()) { break; }
