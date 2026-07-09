@@ -20,6 +20,7 @@
 #include "MatrixElementPiecewiseCoefficient.hpp"
 #include "cardiac_coefficients.hpp"
 #include "torsoSolver.hpp"
+#include "scaled_asm.hpp"
 
 #include <map>
 #include <unordered_set>
@@ -929,30 +930,6 @@ void recursive_mkdir(const std::string dirname, mode_t mode=S_IRWXU|S_IRWXG)
 
 
 
-// Configure a PETSc CG + single-level Additive Schwarz (ASM) preconditioner for
-// the KSP identified by the given options prefix. The settings go into the PETSc
-// options database, so MFEM's Customize()/KSPSetFromOptions applies them on the
-// first solve. Sub-domain blocks are solved with preonly + ICC(icc_levels).
-// This is the single-level ASM baseline for the strong-scaling study (the POD
-// coarse space has been removed).
-static void ConfigureAsmCgOptions(const std::string &prefix,
-                                  int asm_overlap,
-                                  int icc_levels)
-{
-   auto set_opt = [&](const std::string &key, const std::string &value)
-   {
-      const std::string full_key = "-" + prefix + key;
-      PetscOptionsSetValue(NULL, full_key.c_str(), value.c_str());
-   };
-   set_opt("ksp_type", "cg");
-   set_opt("pc_type", "asm");
-   set_opt("pc_asm_type", "basic");
-   set_opt("pc_asm_overlap", std::to_string(asm_overlap));
-   set_opt("sub_ksp_type", "preonly");
-   set_opt("sub_pc_type", "icc");
-   set_opt("sub_pc_factor_levels", std::to_string(icc_levels));
-}
-
 int main(int argc, char *argv[])
 {
    MPI_Init(NULL,NULL);
@@ -1266,10 +1243,12 @@ if (my_rank == 0) {
                 << std::endl;
    }
 
-   // Single-level ASM + CG configuration for the strong-scaling study. All three
-   // linear systems (monodomain, u_e recovery, torso) are solved with CG using a
-   // single-level Additive Schwarz preconditioner and ICC sub-domain solves.
-   // Overlap and ICC fill levels are shared, runtime-tunable knobs:
+   // Scaled additive Schwarz (sASM) configuration for the strong-scaling study.
+   // All three linear systems (monodomain, u_e recovery, torso) are solved with
+   // CG preconditioned by  D^{-1/2} M_ASM(BASIC)^{-1} D^{-1/2},  where D is the
+   // overlap multiplicity. The preconditioner is installed per solver via
+   // AttachScaledASM() right after each SetOperator(). Overlap and ICC fill
+   // levels are shared, runtime-tunable knobs:
    //   -asm_overlap <N>     (default 1)
    //   -asm_icc_levels <L>  (default 0)
    PetscInt asm_overlap = 1;
@@ -1280,19 +1259,9 @@ if (my_rank == 0) {
    PetscOptionsGetInt(NULL, NULL, "-asm_icc_levels", &asm_icc_levels, NULL);
    asm_icc_levels = std::max<PetscInt>(0, asm_icc_levels);
 
-   if (use_petsc)
-   {
-      ConfigureAsmCgOptions("monodomain_", static_cast<int>(asm_overlap),
-                            static_cast<int>(asm_icc_levels));
-      ConfigureAsmCgOptions("recoverue_", static_cast<int>(asm_overlap),
-                            static_cast<int>(asm_icc_levels));
-      ConfigureAsmCgOptions("torso_", static_cast<int>(asm_overlap),
-                            static_cast<int>(asm_icc_levels));
-   }
-
    if (my_rank == 0)
    {
-      std::cout << "[ASM] single-level ASM+CG for all systems: overlap = "
+      std::cout << "[sASM] scaled ASM+CG for all systems: overlap = "
                 << asm_overlap << ", ICC levels = " << asm_icc_levels
                 << std::endl;
    }
@@ -1570,7 +1539,11 @@ else
    //pcg_monodomain_petsc->SetAbsTol(1e-12);
    pcg_monodomain_petsc->SetMaxIter(1000);
    pcg_monodomain_petsc->SetPrintLevel(2);
-    pcg_monodomain_petsc->iterative_mode = true; 
+    pcg_monodomain_petsc->iterative_mode = true;
+   pcg_monodomain_petsc->Customize(true);
+   AttachScaledASM(pcg_monodomain_petsc, MPI_COMM_WORLD,
+                   static_cast<int>(asm_overlap),
+                   static_cast<int>(asm_icc_levels));
 }
    EndTimer();
 
@@ -1771,6 +1744,10 @@ else
     DebugMatrixStage("recoverue PETSc SetOperator begin");
     pcg_recoverue_petsc->SetOperator(*A_recoverue_petsc);
     DebugMatrixStage("recoverue PETSc SetOperator done");
+    pcg_recoverue_petsc->Customize(true);
+    AttachScaledASM(pcg_recoverue_petsc, MPI_COMM_WORLD,
+                    static_cast<int>(asm_overlap),
+                    static_cast<int>(asm_icc_levels));
 }
 
 X_recoverue.SetSize(pfespace->GetTrueVSize());
@@ -1882,6 +1859,10 @@ Vector B_torso, X_torso;
         ConvertHypreToPetscAIJSafe(A_torso_hypre, *A_torso_petsc,
                                    "torso_A", my_rank);
         pcg_petsc->SetOperator(*A_torso_petsc);
+        pcg_petsc->Customize(true);
+        AttachScaledASM(pcg_petsc, MPI_COMM_WORLD,
+                        static_cast<int>(asm_overlap),
+                        static_cast<int>(asm_icc_levels));
    }
 
 
