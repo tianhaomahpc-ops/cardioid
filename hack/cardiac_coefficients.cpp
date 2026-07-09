@@ -96,7 +96,7 @@ void ReactionFunction::Calc(const Vector &xs)
 
       const IntegrationRule &ir = QuadS->GetElementIntRule(i);
       Vector localVm;
-      VmQuad.GetElementValues(i, localVm);
+      VmQuad.GetValues(i, localVm);
       for (int i_num=0; i_num<ir.GetNPoints(); i_num++) {
          const IntegrationPoint &ip = ir.IntPoint(i_num);
          T->SetIntPoint(&ip);
@@ -119,11 +119,11 @@ void QuadratureIntegrator::AssembleRHSElementVect(const FiniteElement &el, Eleme
    result.SetSize(dof_u);
    Vector shape(dof_u);
    
-   const IntegrationRule &ir = p_quadFunction->GetSpace()->GetElementIntRule(Tr.ElementNo);
+   const IntegrationRule &ir = p_quadFunction->GetIntRule(Tr.ElementNo);
 
    result = 0.0;
    Vector localQuad;
-   p_quadFunction->GetElementValues(Tr.ElementNo, localQuad);
+   p_quadFunction->GetValues(Tr.ElementNo, localQuad);
    for (int i = 0; i < ir.GetNPoints(); i++)
    {
       const IntegrationPoint &ip = ir.IntPoint(i);

@@ -45,7 +45,7 @@ inline double tac(triplet t, size_t k) {
     return t[k];
 }
 
-typedef KDTree::KDTree<3, triplet, std::pointer_to_binary_function<triplet,size_t,double> > tree_type;
+typedef ::KDTree::KDTree<3, triplet, std::pointer_to_binary_function<triplet,size_t,double> > tree_type;
 
 #endif	/* TRIPLET_H */
 

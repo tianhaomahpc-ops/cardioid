@@ -1,0 +1,23 @@
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc CMakeCCompilerId.c -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread -Wl,-rpath -Wl,/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -Wl,--enable-new-dtags -L/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -lmpi
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc -print-sysroot
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ CMakeCXXCompilerId.cpp -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread -Wl,-rpath -Wl,/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -Wl,--enable-new-dtags -L/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -lmpi_cxx -lmpi
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ -print-sysroot
+[ld] ld --help
+[ld] ld --help
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc 
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc 
+[ld] ld --help
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ 
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ 
+[ld] ld --help
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc 
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc 
+[ld] ld --help
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ 
+[vcheck] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ 
+[ld] ld --help
+[cc] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc -fopenmp -o CMakeFiles/cmTC_d2b75.dir/OpenMPCheckVersion.c.o -c /home/thma/spack/var/spack/stage/spack-stage-cardioid-elecfem-4e5t4xlwwtftzlfjgzkuoczivqaghcrb/spack-build-4e5t4xl/CMakeFiles/CMakeScratch/TryCompile-BQrlzh/OpenMPCheckVersion.c -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/gcc -fopenmp -rdynamic CMakeFiles/cmTC_d2b75.dir/OpenMPCheckVersion.c.o -o cmTC_d2b75 -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread -Wl,-rpath -Wl,/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -Wl,--enable-new-dtags -L/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -lmpi
+[ld] ld --help
+[cc] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ -fopenmp -o CMakeFiles/cmTC_5d2e8.dir/OpenMPCheckVersion.cpp.o -c /home/thma/spack/var/spack/stage/spack-stage-cardioid-elecfem-4e5t4xlwwtftzlfjgzkuoczivqaghcrb/spack-build-4e5t4xl/CMakeFiles/CMakeScratch/TryCompile-IAYAZx/OpenMPCheckVersion.cpp -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread
+[ccld] /opt/ohpc/pub/compiler/gcc/8.3.0/bin/g++ -fopenmp -rdynamic CMakeFiles/cmTC_5d2e8.dir/OpenMPCheckVersion.cpp.o -o cmTC_5d2e8 -I/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/include -pthread -Wl,-rpath -Wl,/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -Wl,--enable-new-dtags -L/opt/ohpc/pub/mpi/openmpi3-gnu8/3.1.4/lib -lmpi_cxx -lmpi
